@@ -90,8 +90,13 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
   if (_insecure) {
     wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_NONE, nullptr);
   } else if (_rootCA) {
-    wolfSSL_CTX_load_verify_buffer(ctx, reinterpret_cast<const unsigned char*>(_rootCA),
-                                   strlen(_rootCA), WOLFSSL_FILETYPE_PEM);
+    // A CA that fails to load must not leave a connection that only looks verified.
+    if (wolfSSL_CTX_load_verify_buffer(ctx, reinterpret_cast<const unsigned char*>(_rootCA), strlen(_rootCA),
+                                       WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS) {
+      if (Serial) Serial.printf("[SecureClient] CA certificate did not load (%s)\n", label);
+      stop();
+      return 0;
+    }
   }
   wolfSSL_SetIORecv(ctx, wcRecv);
   wolfSSL_SetIOSend(ctx, wcSend);
@@ -105,7 +110,15 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
   _ssl = ssl;
   wolfSSL_SetIOReadCtx(ssl, &_transport);
   wolfSSL_SetIOWriteCtx(ssl, &_transport);
-  wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, host, strlen(host));
+  // SNI carries host names only (RFC 6066): an IP literal is left out.
+  if (IPAddress ip; !ip.fromString(host)) wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, host, strlen(host));
+  // The chain alone proves a CA signed the certificate, not that it is this host's: check the
+  // name (or IP) against the certificate too whenever the peer is verified.
+  if (!_insecure && wolfSSL_check_domain_name(ssl, host) != WOLFSSL_SUCCESS) {
+    if (Serial) Serial.printf("[SecureClient] host name check setup failed (%s)\n", label);
+    stop();
+    return 0;
+  }
 #if defined(WOLFSSL_TLS13) && defined(HAVE_CURVE25519)
   // MEMFIX-PORT: pin the TLS 1.3 key_share to X25519. wolfSSL's default is a
   // P-256 share, generated with fast-math bignums that WOLFSSL_SMALL_STACK
