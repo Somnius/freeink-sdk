@@ -1912,9 +1912,7 @@ constexpr BoardProfile XTEINK_X4_PRO = {
     // duty).
     // GPIO8 is the hardware-confirmed cool channel and GPIO9 the warm channel;
     // FrontlightManager mixes them for color-temperature control.
-    // 11-bit (stock uses 10): the APB-clocked LEDC fits 2048 steps at 25 kHz (80 MHz / 25 kHz =
-    // 3200), so 1% lands on 1/2047 duty, half the old dimmest light; 3% and up are unchanged.
-    {8, 25000, 11, true, 9},
+    {8, 25000, 10, true, 9},
     NO_AUDIO,
     NO_LEDS,
     NO_FLIP,  // panel mount transform pending hardware; native SSD1677 scan is 800x480 landscape
