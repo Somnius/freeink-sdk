@@ -203,9 +203,25 @@ int SecureClient::connect(IPAddress ip, uint16_t port) {
 }
 
 size_t SecureClient::write(const uint8_t* buf, size_t size) {
+  _writeWouldBlock = false;
   if (!_connected) return 0;
-  const int n = wolfSSL_write(static_cast<WOLFSSL*>(_ssl), buf, size);
-  return n > 0 ? static_cast<size_t>(n) : 0;
+  auto* ssl = static_cast<WOLFSSL*>(_ssl);
+  const int n = wolfSSL_write(ssl, buf, size);
+  if (n > 0) return static_cast<size_t>(n);
+
+  // The transport took nothing more (wcSend answered WANT_WRITE after WiFiClient's own wait).
+  // wolfSSL holds the record it could not send and finishes it on the next call with the same
+  // buffer and size; the records before it are on the wire already, so this is not "nothing sent".
+  const int err = wolfSSL_get_error(ssl, n);
+  if (isWantIo(err)) {
+    _writeWouldBlock = true;
+    return 0;
+  }
+  if (Serial) {
+    Serial.printf("[SecureClient] write failed: %d (%u bytes), free heap %u, max block %u\n", err, (unsigned)size,
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  }
+  return 0;
 }
 
 int SecureClient::read(uint8_t* buf, size_t size) {

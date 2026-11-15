@@ -58,7 +58,11 @@ class SecureClient : public Client {
   int connect(const char* host, uint16_t port) override;
 
   size_t write(uint8_t b) override;
+  // All of `buf` or 0: there is no partial count. A 0 with writeWouldBlock() true means the socket
+  // took no more for now; TLS keeps the record it had started, so the caller must call again with
+  // the SAME buffer and size until it is accepted (or give up and stop()). Any other 0 is a failure.
   size_t write(const uint8_t* buf, size_t size) override;
+  bool writeWouldBlock() const { return _writeWouldBlock; }
   int available() override;
   int read() override;
   int read(uint8_t* buf, size_t size) override;
@@ -86,6 +90,7 @@ class SecureClient : public Client {
   void* _ssl = nullptr;  // WOLFSSL* (opaque to keep wolfSSL headers out of here)
   void* _ctx = nullptr;  // WOLFSSL_CTX*
   bool _connected = false;
+  bool _writeWouldBlock = false;
 };
 
 }  // namespace freeink

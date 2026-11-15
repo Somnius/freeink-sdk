@@ -201,6 +201,9 @@ class SecureHttpClient {
     _bodyComplete = false;
     _callbackAborted = false;
     _aborted = false;
+    _failure = Failure::None;
+    _requestBodySent = 0;
+    _requestBodyLength = payload ? payloadLen : 0;
 
     // One transparent retry: a keep-alive server may close the connection
     // between requests at any time, and the race surfaces as a write failure
@@ -211,11 +214,14 @@ class SecureHttpClient {
     for (int attempt = 0; attempt < 2; ++attempt) {
       const bool reusing = connectionMatches();
       if (isAborted(shouldAbort)) return -1;
-      if (!ensureConnected(shouldAbort)) return -1;
+      if (!ensureConnected(shouldAbort)) {
+        _failure = Failure::Connect;
+        return -1;
+      }
 
-      if (!writeRequest(method, payload, payloadLen)) {
+      if (!writeRequest(method, payload, payloadLen, shouldAbort)) {
         closeConnection();
-        if (reusing && attempt == 0) continue;
+        if (reusing && attempt == 0 && !_aborted) continue;
         return -1;
       }
 
@@ -224,8 +230,10 @@ class SecureHttpClient {
       if (!readLine(*_conn, line, headerDeadline, shouldAbort)) {
         closeConnection();
         if (reusing && attempt == 0 && !_aborted) continue;
+        if (!_aborted) _failure = Failure::NoStatusLine;
         return -1;
       }
+      _failure = Failure::None;
       // "HTTP/1.1 200 OK" — the status code starts at offset 9.
       _status = line.size() >= 12 ? atoi(line.c_str() + 9) : 0;
       // HTTP/1.0 peers default to connection-per-request; only an explicit
@@ -302,6 +310,15 @@ class SecureHttpClient {
   bool responseComplete() const { return _bodyComplete; }
   bool callbackAborted() const { return _callbackAborted; }
   bool aborted() const { return _aborted; }
+  // Why the last request came back below zero (None after an answer, or when the caller aborted).
+  // WriteHeaders / WriteBody: the request could not be written whole, the connection was closed
+  // and nothing was read; requestBodySent() of requestBodyLength() says how far the body got
+  // (over TLS in whole pieces of up to WRITE_CHUNK bytes). NoStatusLine: the request was written
+  // whole (every byte accepted by the socket) and no status line came back within the timeout.
+  enum class Failure : uint8_t { None, Connect, WriteHeaders, WriteBody, NoStatusLine };
+  Failure failure() const { return _failure; }
+  size_t requestBodySent() const { return _requestBodySent; }
+  size_t requestBodyLength() const { return _requestBodyLength; }
   bool hasContentLength() const { return _haveContentLength; }
   size_t getContentLength() const { return _contentLength; }
 
@@ -463,9 +480,37 @@ class SecureHttpClient {
     _connHttps = false;
   }
 
+  // Writes all of `data`, however the socket takes it. A write may accept a part (a plain socket
+  // with a full send buffer) or nothing for now (the same, or TLS waiting on it): the rest is
+  // offered again until every byte is in. False when the connection is gone, on a TLS error, on
+  // an abort, or when the socket took nothing for the whole timeout (a stall). `sent` counts the
+  // bytes accepted either way. An unaccepted piece is offered again unchanged, as
+  // SecureClient::write requires.
+  bool writeAll(const uint8_t* data, size_t len, size_t& sent, const AbortCallback& shouldAbort) {
+    unsigned long deadline = millis() + _timeoutMs;
+    while (sent < len) {
+      if (isAborted(shouldAbort)) return false;
+      const size_t want = std::min(len - sent, WRITE_CHUNK);
+      const size_t n = _conn->write(data + sent, want);
+      if (n > 0) {
+        sent += std::min(n, want);
+        deadline = millis() + _timeoutMs;
+        continue;
+      }
+      if (!_conn->connected()) return false;
+      if (_connHttps && !_secure.writeWouldBlock()) return false;
+      if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
+      delay(2);
+    }
+    return true;
+  }
+
   // Request line + headers (+ body). Write results are checked: a stale
-  // keep-alive socket often surfaces first as a failed write.
-  bool writeRequest(const char* method, const uint8_t* payload, size_t payloadLen) {
+  // keep-alive socket often surfaces first as a failed write. The body is
+  // written whole or the request fails: Content-Length is never left
+  // announcing bytes that were not sent on a connection that stays open.
+  bool writeRequest(const char* method, const uint8_t* payload, size_t payloadLen,
+                    const AbortCallback& shouldAbort = nullptr) {
     std::string req = std::string(method) + " " + _path + " HTTP/1.1\r\nHost: " + hostHeader() + "\r\n";
     req += "User-Agent: " + _userAgent + "\r\n";
     req += _reuse ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
@@ -476,8 +521,16 @@ class SecureHttpClient {
     for (const std::string& h : _headers) req += h;
     if (payload && payloadLen) req += "Content-Length: " + std::to_string(payloadLen) + "\r\n";
     req += "\r\n";
-    if (_conn->write(reinterpret_cast<const uint8_t*>(req.data()), req.size()) != req.size()) return false;
-    if (payload && payloadLen && _conn->write(payload, payloadLen) != payloadLen) return false;
+    size_t headSent = 0;
+    _requestBodySent = 0;
+    if (!writeAll(reinterpret_cast<const uint8_t*>(req.data()), req.size(), headSent, shouldAbort)) {
+      if (!_aborted) _failure = Failure::WriteHeaders;
+      return false;
+    }
+    if (payload && payloadLen && !writeAll(payload, payloadLen, _requestBodySent, shouldAbort)) {
+      if (!_aborted) _failure = Failure::WriteBody;
+      return false;
+    }
     return true;
   }
 
@@ -591,6 +644,9 @@ class SecureHttpClient {
   // connection mid-stream; 2 KB removed the stall. Stack-allocated in the
   // body readers, so kept modest.
   static constexpr size_t READ_CHUNK = 2048;
+  // One write() of a request: small enough that a stalled socket is noticed
+  // (and the caller's abort callback polled) between pieces of a big body.
+  static constexpr size_t WRITE_CHUNK = 4096;
   static constexpr size_t MAX_LINE = 4096;  // header / chunk-size line cap
 
   // Kept-alive connection state. _conn points at _secure or _plain while a
@@ -625,6 +681,9 @@ class SecureHttpClient {
   bool _bodyComplete = false;
   bool _callbackAborted = false;
   bool _aborted = false;
+  Failure _failure = Failure::None;
+  size_t _requestBodySent = 0;
+  size_t _requestBodyLength = 0;
   uint32_t _timeoutMs = 15000;
   std::vector<std::string> _headers;
 };
