@@ -215,7 +215,7 @@ class SecureHttpClient {
       const bool reusing = connectionMatches();
       if (isAborted(shouldAbort)) return -1;
       if (!ensureConnected(shouldAbort)) {
-        _failure = Failure::Connect;
+        if (!_aborted) _failure = _connHandshakeFailed ? Failure::Handshake : Failure::Connect;
         return -1;
       }
 
@@ -241,8 +241,12 @@ class SecureHttpClient {
       bool keepAlive = line.compare(0, 9, "HTTP/1.0 ") != 0;
 
       std::string transferEncoding;
+      bool headersWhole = false;
       while (readLine(*_conn, line, headerDeadline, shouldAbort)) {
-        if (line.empty()) break;  // end of headers
+        if (line.empty()) {  // end of headers
+          headersWhole = true;
+          break;
+        }
         const size_t colon = line.find(':');
         if (colon == std::string::npos) continue;
         std::string name = line.substr(0, colon);
@@ -268,6 +272,12 @@ class SecureHttpClient {
       if (_aborted) {
         closeConnection();
         return -1;
+      }
+      // Headers that stopped before their blank line (a timeout, a closed socket): what follows
+      // on this connection is not a body, and how the body is framed is not known.
+      if (!headersWhole) {
+        closeConnection();
+        return _status;
       }
 
       // A close-delimited body (no framing) ends WITH the connection, so it can
@@ -315,7 +325,9 @@ class SecureHttpClient {
   // and nothing was read; requestBodySent() of requestBodyLength() says how far the body got
   // (over TLS in whole pieces of up to WRITE_CHUNK bytes). NoStatusLine: the request was written
   // whole (every byte accepted by the socket) and no status line came back within the timeout.
-  enum class Failure : uint8_t { None, Connect, WriteHeaders, WriteBody, NoStatusLine };
+  // Connect: the server could not be reached (no TCP connection). Handshake: it was reached and
+  // the TLS setup or handshake failed (a certificate that is not accepted, a wrong name, a timeout).
+  enum class Failure : uint8_t { None, Connect, WriteHeaders, WriteBody, NoStatusLine, Handshake };
   Failure failure() const { return _failure; }
   size_t requestBodySent() const { return _requestBodySent; }
   size_t requestBodyLength() const { return _requestBodyLength; }
@@ -444,6 +456,7 @@ class SecureHttpClient {
   bool ensureConnected(const AbortCallback& shouldAbort = nullptr) {
     if (connectionMatches()) return true;
     closeConnection();
+    _connHandshakeFailed = false;
     if (_scheme == "https") {
       if (_insecure) {
         _secure.setInsecure();
@@ -454,6 +467,7 @@ class SecureHttpClient {
       _secure.setAbortCallback(shouldAbort);
       if (!_secure.connect(_host.c_str(), _port)) {
         if (_secure.aborted()) _aborted = true;
+        _connHandshakeFailed = _secure.reachedServer();
         return false;
       }
       _conn = &_secure;
@@ -629,9 +643,13 @@ class SecureHttpClient {
       const unsigned long size = strtoul(sizeText.c_str(), &parseEnd, 16);
       if (parseEnd == sizeText.c_str()) return false;
       if (size == 0) {
-        while (readLine(c, line, millis() + _timeoutMs, shouldAbort) && !line.empty()) {
+        // Whole only when the blank line that ends the body (after any trailers) was read. A line
+        // that did not come in time is not the end: its bytes would still arrive, in front of the
+        // next response on a kept connection.
+        for (;;) {
+          if (!readLine(c, line, millis() + _timeoutMs, shouldAbort)) return false;
+          if (line.empty()) return true;
         }
-        return !_aborted;
       }
       if (!readFixed(c, size, onData, shouldAbort)) return false;
       if (!readLine(c, line, millis() + _timeoutMs, shouldAbort)) return false;  // consume trailing CRLF
@@ -657,6 +675,7 @@ class SecureHttpClient {
   std::string _connHost;
   uint16_t _connPort = 0;
   bool _connHttps = false;
+  bool _connHandshakeFailed = false;
   bool _reuse = true;
 
   std::string _scheme;

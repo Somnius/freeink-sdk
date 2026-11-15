@@ -67,6 +67,7 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
 #endif
   const uint32_t started = millis();
   stop();
+  _reachedServer = false;
   const uint32_t timeoutMs = getTimeout();
   if (abortRequested()) return 0;
   _transport.setConnectionTimeout(timeoutMs);
@@ -74,6 +75,7 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
     if (Serial) Serial.printf("[SecureClient] TCP connect failed (%s): %s:%u\n", label, host, port);
     return 0;
   }
+  _reachedServer = true;
   if (abortRequested()) {
     _transport.stop();
     return 0;

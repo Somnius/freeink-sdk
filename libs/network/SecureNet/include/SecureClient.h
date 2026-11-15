@@ -53,6 +53,11 @@ class SecureClient : public Client {
   // rather than because the connection failed.
   bool aborted() const { return _aborted; }
 
+  // After a connect() that failed: true when the server was reached (the TCP connection was made)
+  // and the TLS setup or handshake then failed (a certificate that is not accepted, a wrong host
+  // name, a handshake that timed out); false when the server could not be reached at all.
+  bool reachedServer() const { return _reachedServer; }
+
   // Connect and perform a TLS 1.3 handshake to host:port (uses the SNI host).
   int connect(IPAddress ip, uint16_t port) override;
   int connect(const char* host, uint16_t port) override;
@@ -85,6 +90,7 @@ class SecureClient : public Client {
   WiFiClient _transport;
   AbortCallback _shouldAbort;
   bool _aborted = false;
+  bool _reachedServer = false;
   const char* _rootCA = nullptr;
   bool _insecure = false;
   void* _ssl = nullptr;  // WOLFSSL* (opaque to keep wolfSSL headers out of here)
