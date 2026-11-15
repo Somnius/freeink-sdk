@@ -213,6 +213,7 @@ class SecureHttpClient {
     // connection is a real error and is not retried.
     for (int attempt = 0; attempt < 2; ++attempt) {
       const bool reusing = connectionMatches();
+      _reusedConnection = reusing;
       if (isAborted(shouldAbort)) return -1;
       if (!ensureConnected(shouldAbort)) {
         if (!_aborted) _failure = _connHandshakeFailed ? Failure::Handshake : Failure::Connect;
@@ -331,6 +332,11 @@ class SecureHttpClient {
   Failure failure() const { return _failure; }
   size_t requestBodySent() const { return _requestBodySent; }
   size_t requestBodyLength() const { return _requestBodyLength; }
+  // Connections made by this client so far (TCP, and the TLS handshake for https): a request that
+  // went out on a kept connection does not add one. reusedConnection(): the last request (its last
+  // attempt) was written to a connection kept from an earlier request.
+  uint32_t connectionsOpened() const { return _connectionsOpened; }
+  bool reusedConnection() const { return _reusedConnection; }
   bool hasContentLength() const { return _haveContentLength; }
   size_t getContentLength() const { return _contentLength; }
 
@@ -481,14 +487,16 @@ class SecureHttpClient {
     }
     _connHost = _host;
     _connPort = _port;
+    ++_connectionsOpened;
     return true;
   }
 
+  // Both sockets are stopped whatever this client believes about them: after this call no TCP
+  // connection and no TLS session of it is left, so the next request connects anew.
   void closeConnection() {
-    if (_conn) {
-      _conn->stop();
-      _conn = nullptr;
-    }
+    _conn = nullptr;
+    _secure.stop();
+    _plain.stop();
     _connHost.clear();
     _connPort = 0;
     _connHttps = false;
@@ -677,6 +685,8 @@ class SecureHttpClient {
   bool _connHttps = false;
   bool _connHandshakeFailed = false;
   bool _reuse = true;
+  bool _reusedConnection = false;
+  uint32_t _connectionsOpened = 0;
 
   std::string _scheme;
   std::string _host;
