@@ -163,6 +163,9 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
         Serial.printf("[SecureClient] handshake timeout (%s): last err %d, transport %s, free heap %u\n", label, err,
                       _transport.connected() ? "up" : "down", (unsigned)ESP.getFreeHeap());
       }
+      // A server that does not answer the handshake in time would not answer a TLS 1.2 one
+      // either: no second try (that is for a server that refused the handshake).
+      _reachedServer = false;
       stop();
       return 0;
     }
@@ -190,8 +193,8 @@ int SecureClient::connect(const char* host, uint16_t port) {
   // offers it (WOLFSSL_TLS13 is enabled) and falls back to 1.2 otherwise.
   if (connectWithMethod(host, port, wolfSSLv23_client_method(), "auto")) return 1;
   if (_aborted) return 0;
-  // No TCP connection at all: a second try would only wait out the connect timeout again. The
-  // TLS 1.2 retry is for a server that was reached and refused the handshake.
+  // No TCP connection at all, or a handshake that timed out: a second try would only wait out the
+  // timeout again. The TLS 1.2 retry is for a server that was reached and refused the handshake.
   if (!_reachedServer) return 0;
 
   // Some TLS 1.2-only servers are intolerant of a TLS 1.3-capable ClientHello
