@@ -72,6 +72,12 @@ class SecureHttpClient {
     _insecure = false;
   }
   void setTimeout(uint32_t ms) { _timeoutMs = ms; }
+  // Shorter waits for the two points where a dead server shows first, so that it is not waited on
+  // for the whole body timeout. Connect: the TCP connection and then the TLS handshake, each at
+  // most this long. Response: from the request written whole to the status line and the headers.
+  // 0 (the default): setTimeout()'s value, as before.
+  void setConnectTimeout(uint32_t ms) { _connectTimeoutMs = ms; }
+  void setResponseTimeout(uint32_t ms) { _responseTimeoutMs = ms; }
   // Progress reporting for response bodies (download meters). Called after
   // each delivered chunk with the running byte count; never called for
   // drained redirect bodies. Returning false aborts the transfer (reported
@@ -204,6 +210,7 @@ class SecureHttpClient {
     _failure = Failure::None;
     _requestBodySent = 0;
     _requestBodyLength = payload ? payloadLen : 0;
+    _requestAttempts = 0;
 
     // One transparent retry: a keep-alive server may close the connection
     // between requests at any time, and the race surfaces as a write failure
@@ -220,13 +227,14 @@ class SecureHttpClient {
         return -1;
       }
 
+      ++_requestAttempts;
       if (!writeRequest(method, payload, payloadLen, shouldAbort)) {
         closeConnection();
         if (reusing && attempt == 0 && !_aborted) continue;
         return -1;
       }
 
-      const unsigned long headerDeadline = millis() + _timeoutMs;
+      const unsigned long headerDeadline = millis() + (_responseTimeoutMs ? _responseTimeoutMs : _timeoutMs);
       std::string line;
       if (!readLine(*_conn, line, headerDeadline, shouldAbort)) {
         closeConnection();
@@ -337,6 +345,9 @@ class SecureHttpClient {
   // attempt) was written to a connection kept from an earlier request.
   uint32_t connectionsOpened() const { return _connectionsOpened; }
   bool reusedConnection() const { return _reusedConnection; }
+  // How many times the last request was written to a connection: 2 when the first try went out on
+  // a kept connection that turned out dead and the request was sent again on a new one.
+  uint8_t requestAttempts() const { return _requestAttempts; }
   bool hasContentLength() const { return _haveContentLength; }
   size_t getContentLength() const { return _contentLength; }
 
@@ -463,13 +474,14 @@ class SecureHttpClient {
     if (connectionMatches()) return true;
     closeConnection();
     _connHandshakeFailed = false;
+    const uint32_t connectMs = _connectTimeoutMs ? _connectTimeoutMs : _timeoutMs;
     if (_scheme == "https") {
       if (_insecure) {
         _secure.setInsecure();
       } else if (_rootCA) {
         _secure.setCACert(_rootCA);
       }
-      _secure.setTimeout(_timeoutMs);
+      _secure.setTimeout(connectMs);
       _secure.setAbortCallback(shouldAbort);
       if (!_secure.connect(_host.c_str(), _port)) {
         if (_secure.aborted()) _aborted = true;
@@ -480,7 +492,7 @@ class SecureHttpClient {
       _connHttps = true;
     } else {
       _plain.setTimeout(_timeoutMs);
-      _plain.setConnectionTimeout(_timeoutMs);
+      _plain.setConnectionTimeout(connectMs);
       if (!_plain.connect(_host.c_str(), _port)) return false;
       _conn = &_plain;
       _connHttps = false;
@@ -714,6 +726,9 @@ class SecureHttpClient {
   size_t _requestBodySent = 0;
   size_t _requestBodyLength = 0;
   uint32_t _timeoutMs = 15000;
+  uint32_t _connectTimeoutMs = 0;   // 0: _timeoutMs
+  uint32_t _responseTimeoutMs = 0;  // 0: _timeoutMs
+  uint8_t _requestAttempts = 0;
   std::vector<std::string> _headers;
 };
 

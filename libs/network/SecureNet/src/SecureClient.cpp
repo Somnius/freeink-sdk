@@ -190,6 +190,9 @@ int SecureClient::connect(const char* host, uint16_t port) {
   // offers it (WOLFSSL_TLS13 is enabled) and falls back to 1.2 otherwise.
   if (connectWithMethod(host, port, wolfSSLv23_client_method(), "auto")) return 1;
   if (_aborted) return 0;
+  // No TCP connection at all: a second try would only wait out the connect timeout again. The
+  // TLS 1.2 retry is for a server that was reached and refused the handshake.
+  if (!_reachedServer) return 0;
 
   // Some TLS 1.2-only servers are intolerant of a TLS 1.3-capable ClientHello
   // and abort with a fatal handshake_failure alert. Retry with an explicit
